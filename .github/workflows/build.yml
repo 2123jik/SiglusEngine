@@ -1,19 +1,35 @@
-name: Build DLL
-on: [push, workflow_dispatch]
+name: Build Siglus Hook DLL
+
+# 触发条件：当你推送代码，或者手动点击网页按钮时触发
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
 jobs:
   build:
+    # 租用一台微软最新的 Windows 云电脑
     runs-on: windows-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v2
-      - name: Install MinHook via vcpkg
-        run: vcpkg install minhook:x86-windows-static
-      - name: Compile DLL
+      # 1. 把仓库里的 dllmain.cpp 下载到云电脑
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 2. 下载 MinHook 源码（几秒钟搞定）
+      - name: Download MinHook
+        run: git clone https://github.com/TsudaKageyu/minhook.git minhook-src
+
+      # 3. 调用云电脑里自带的 32 位 MSVC 编译器进行编译
+      - name: Compile 32-bit version.dll
+        shell: cmd
         run: |
-          cl.exe /O2 /LD /Fe:version.dll dllmain.cpp /I"C:\vcpkg\installed\x86-windows-static\include" /link /LIBPATH:"C:\vcpkg\installed\x86-windows-static\lib" minhook.lib user32.lib advapi32.lib
-      - name: Upload Artifact
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
+          cl.exe /O2 /LD /Fe:version.dll dllmain.cpp minhook-src\src\buffer.c minhook-src\src\hook.c minhook-src\src\trampoline.c minhook-src\src\hde\hde32.c /I minhook-src\include user32.lib advapi32.lib
+
+      # 4. 把编译好的 version.dll 打包，供你下载
+      - name: Upload Finished DLL
         uses: actions/upload-artifact@v4
         with:
-          name: version-dll
+          name: Siglus-version-dll
           path: version.dll
