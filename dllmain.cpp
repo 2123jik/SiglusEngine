@@ -1,7 +1,7 @@
 #include <windows.h>
 #include <MinHook.h>
 
-// 转发系统 version.dll 的函数，避免系统功能失效
+// 1. 系统 version.dll 转发
 #pragma comment(linker, "/EXPORT:GetFileVersionInfoA=C:\\Windows\\System32\\version.GetFileVersionInfoA")
 #pragma comment(linker, "/EXPORT:GetFileVersionInfoByHandle=C:\\Windows\\System32\\version.GetFileVersionInfoByHandle")
 #pragma comment(linker, "/EXPORT:GetFileVersionInfoExA=C:\\Windows\\System32\\version.GetFileVersionInfoExA")
@@ -20,57 +20,88 @@
 #pragma comment(linker, "/EXPORT:VerQueryValueA=C:\\Windows\\System32\\version.VerQueryValueA")
 #pragma comment(linker, "/EXPORT:VerQueryValueW=C:\\Windows\\System32\\version.VerQueryValueW")
 
-typedef DWORD (WINAPI *pfnGetTimeZoneInformation)(LPTIME_ZONE_INFORMATION lpTimeZoneInformation);
-typedef UINT  (WINAPI *pfnGetACP)();
-typedef UINT  (WINAPI *pfnGetOEMCP)();
-typedef LCID  (WINAPI *pfnGetSystemDefaultLCID)();
-typedef LCID  (WINAPI *pfnGetUserDefaultLCID)();
-typedef LCID  (WINAPI *pfnGetThreadLocale)();
+// 2. 内存特征码自动打补丁（直接在内存中干掉所有 JNE 报错跳转）
+void AutoPatchMemory() {
+    HMODULE hExe = GetModuleHandleW(NULL);
+    if (!hExe) return;
 
-pfnGetTimeZoneInformation oGetTimeZoneInformation = NULL;
-pfnGetACP                  oGetACP                  = NULL;
-pfnGetOEMCP                oGetOEMCP                = NULL;
-pfnGetSystemDefaultLCID    oGetSystemDefaultLCID    = NULL;
-pfnGetUserDefaultLCID      oGetUserDefaultLCID      = NULL;
-pfnGetThreadLocale         oGetThreadLocale         = NULL;
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)hExe;
+    PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((BYTE*)hExe + dos->e_lfanew);
+    
+    // 遍历代码段 (.text)
+    BYTE* base = (BYTE*)hExe + nt->OptionalHeader.BaseOfCode;
+    DWORD size = nt->OptionalHeader.SizeOfCode;
 
-// 伪造日本时区 (UTC+9, Tokyo)
-DWORD WINAPI Hooked_GetTimeZoneInformation(LPTIME_ZONE_INFORMATION lpTZI) {
-    DWORD res = oGetTimeZoneInformation(lpTZI);
-    if (lpTZI) {
-        lpTZI->Bias = -540;
-        lpTZI->StandardBias = 0;
-        lpTZI->DaylightBias = 0;
-        wcscpy_s(lpTZI->StandardName, L"Tokyo Standard Time");
-        wcscpy_s(lpTZI->DaylightName, L"Tokyo Daylight Time");
+    // 搜索特征：84 C0 0F 85 ?? ?? ?? ?? (test al, al; jne ...)
+    // 遇到判断直接把 0F 85 (jne) 改为 90 E9 (nop; jmp) 强制通过
+    for (DWORD i = 0; i < size - 8; i++) {
+        if (base[i] == 0x84 && base[i+1] == 0xC0 && base[i+2] == 0x0F && base[i+3] == 0x85) {
+            DWORD oldProtect;
+            if (VirtualProtect(&base[i+2], 6, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+                // 0F 85 xx xx xx xx -> 90 E9 xx xx xx xx (转成无条件跳转 jmp)
+                base[i+2] = 0x90;
+                base[i+3] = 0xE9;
+                VirtualProtect(&base[i+2], 6, oldProtect, &oldProtect);
+            }
+        }
+    }
+}
+
+// 3. API 欺骗：补充新版时区与动态时区 API
+typedef DWORD (WINAPI *pfnGetDynamicTimeZoneInformation)(PDYNAMIC_TIME_ZONE_INFORMATION pDTZI);
+pfnGetDynamicTimeZoneInformation oGetDynamicTimeZoneInformation = NULL;
+
+DWORD WINAPI Hooked_GetDynamicTimeZoneInformation(PDYNAMIC_TIME_ZONE_INFORMATION pDTZI) {
+    if (pDTZI) {
+        memset(pDTZI, 0, sizeof(DYNAMIC_TIME_ZONE_INFORMATION));
+        pDTZI->Bias = -540; // UTC+9
+        wcscpy_s(pDTZI->StandardName, L"Tokyo Standard Time");
+        wcscpy_s(pDTZI->TimeZoneKeyName, L"Tokyo Standard Time");
     }
     return TIME_ZONE_ID_STANDARD;
 }
 
-// 伪造日文代码页 932
-UINT WINAPI Hooked_GetACP()   { return 932; }
+typedef DWORD (WINAPI *pfnGetTimeZoneInformation)(LPTIME_ZONE_INFORMATION lpTimeZoneInformation);
+pfnGetTimeZoneInformation oGetTimeZoneInformation = NULL;
+
+DWORD WINAPI Hooked_GetTimeZoneInformation(LPTIME_ZONE_INFORMATION lpTZI) {
+    if (lpTZI) {
+        memset(lpTZI, 0, sizeof(TIME_ZONE_INFORMATION));
+        lpTZI->Bias = -540; // UTC+9
+        wcscpy_s(lpTZI->StandardName, L"Tokyo Standard Time");
+    }
+    return TIME_ZONE_ID_STANDARD;
+}
+
+UINT WINAPI Hooked_GetACP() { return 932; }
 UINT WINAPI Hooked_GetOEMCP() { return 932; }
-
-// 伪造日文 Locale 0x0411
 LCID WINAPI Hooked_GetSystemDefaultLCID() { return 0x0411; }
-LCID WINAPI Hooked_GetUserDefaultLCID()   { return 0x0411; }
-LCID WINAPI Hooked_GetThreadLocale()      { return 0x0411; }
+LCID WINAPI Hooked_GetUserDefaultLCID() { return 0x0411; }
+LANGID WINAPI Hooked_GetUserDefaultUILanguage() { return 0x0411; }
+LANGID WINAPI Hooked_GetSystemDefaultUILanguage() { return 0x0411; }
 
-void InstallLocaleHooks() {
+void InstallHooks() {
+    // 先做内存扫描自动打补丁（双重保险）
+    AutoPatchMemory();
+
     if (MH_Initialize() != MH_OK) return;
+
     MH_CreateHookApi(L"kernel32.dll", "GetTimeZoneInformation", Hooked_GetTimeZoneInformation, (void**)&oGetTimeZoneInformation);
-    MH_CreateHookApi(L"kernel32.dll", "GetACP", Hooked_GetACP, (void**)&oGetACP);
-    MH_CreateHookApi(L"kernel32.dll", "GetOEMCP", Hooked_GetOEMCP, (void**)&oGetOEMCP);
-    MH_CreateHookApi(L"kernel32.dll", "GetSystemDefaultLCID", Hooked_GetSystemDefaultLCID, (void**)&oGetSystemDefaultLCID);
-    MH_CreateHookApi(L"kernel32.dll", "GetUserDefaultLCID", Hooked_GetUserDefaultLCID, (void**)&oGetUserDefaultLCID);
-    MH_CreateHookApi(L"kernel32.dll", "GetThreadLocale", Hooked_GetThreadLocale, (void**)&oGetThreadLocale);
+    MH_CreateHookApi(L"kernel32.dll", "GetDynamicTimeZoneInformation", Hooked_GetDynamicTimeZoneInformation, (void**)&oGetDynamicTimeZoneInformation);
+    MH_CreateHookApi(L"kernel32.dll", "GetACP", Hooked_GetACP, NULL);
+    MH_CreateHookApi(L"kernel32.dll", "GetOEMCP", Hooked_GetOEMCP, NULL);
+    MH_CreateHookApi(L"kernel32.dll", "GetSystemDefaultLCID", Hooked_GetSystemDefaultLCID, NULL);
+    MH_CreateHookApi(L"kernel32.dll", "GetUserDefaultLCID", Hooked_GetUserDefaultLCID, NULL);
+    MH_CreateHookApi(L"kernel32.dll", "GetUserDefaultUILanguage", Hooked_GetUserDefaultUILanguage, NULL);
+    MH_CreateHookApi(L"kernel32.dll", "GetSystemDefaultUILanguage", Hooked_GetSystemDefaultUILanguage, NULL);
+
     MH_EnableHook(MH_ALL_HOOKS);
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        InstallLocaleHooks();
+        InstallHooks();
     }
     return TRUE;
 }
