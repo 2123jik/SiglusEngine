@@ -1,10 +1,7 @@
 #include <windows.h>
 #include <MinHook.h>
 
-// ==========================================
-// 1. 系统 version.dll 的函数转发
-// 保证系统正常的版本查询函数不失效
-// ==========================================
+// 转发系统 version.dll 的函数，避免系统功能失效
 #pragma comment(linker, "/EXPORT:GetFileVersionInfoA=C:\\Windows\\System32\\version.GetFileVersionInfoA")
 #pragma comment(linker, "/EXPORT:GetFileVersionInfoByHandle=C:\\Windows\\System32\\version.GetFileVersionInfoByHandle")
 #pragma comment(linker, "/EXPORT:GetFileVersionInfoExA=C:\\Windows\\System32\\version.GetFileVersionInfoExA")
@@ -23,9 +20,6 @@
 #pragma comment(linker, "/EXPORT:VerQueryValueA=C:\\Windows\\System32\\version.VerQueryValueA")
 #pragma comment(linker, "/EXPORT:VerQueryValueW=C:\\Windows\\System32\\version.VerQueryValueW")
 
-// ==========================================
-// 2. 原函数指针声明
-// ==========================================
 typedef DWORD (WINAPI *pfnGetTimeZoneInformation)(LPTIME_ZONE_INFORMATION lpTimeZoneInformation);
 typedef UINT  (WINAPI *pfnGetACP)();
 typedef UINT  (WINAPI *pfnGetOEMCP)();
@@ -40,15 +34,11 @@ pfnGetSystemDefaultLCID    oGetSystemDefaultLCID    = NULL;
 pfnGetUserDefaultLCID      oGetUserDefaultLCID      = NULL;
 pfnGetThreadLocale         oGetThreadLocale         = NULL;
 
-// ==========================================
-// 3. 拦截函数（伪造日本环境）
-// ==========================================
-
-// 欺骗时区：将时区 Bias 强制篡改为 -540（UTC+9 日本时间），名称设为 Tokyo
+// 伪造日本时区 (UTC+9, Tokyo)
 DWORD WINAPI Hooked_GetTimeZoneInformation(LPTIME_ZONE_INFORMATION lpTZI) {
     DWORD res = oGetTimeZoneInformation(lpTZI);
     if (lpTZI) {
-        lpTZI->Bias = -540; // -540 分钟即 UTC+9 (日本时区)
+        lpTZI->Bias = -540;
         lpTZI->StandardBias = 0;
         lpTZI->DaylightBias = 0;
         wcscpy_s(lpTZI->StandardName, L"Tokyo Standard Time");
@@ -57,58 +47,26 @@ DWORD WINAPI Hooked_GetTimeZoneInformation(LPTIME_ZONE_INFORMATION lpTZI) {
     return TIME_ZONE_ID_STANDARD;
 }
 
-// 欺骗代码页：强制返回 932 (日文 Shift-JIS)
-UINT WINAPI Hooked_GetACP() {
-    return 932;
-}
+// 伪造日文代码页 932
+UINT WINAPI Hooked_GetACP()   { return 932; }
+UINT WINAPI Hooked_GetOEMCP() { return 932; }
 
-UINT WINAPI Hooked_GetOEMCP() {
-    return 932;
-}
+// 伪造日文 Locale 0x0411
+LCID WINAPI Hooked_GetSystemDefaultLCID() { return 0x0411; }
+LCID WINAPI Hooked_GetUserDefaultLCID()   { return 0x0411; }
+LCID WINAPI Hooked_GetThreadLocale()      { return 0x0411; }
 
-// 欺骗 Locale ID：强制返回 0x0411 (日文语言代码 1041)
-LCID WINAPI Hooked_GetSystemDefaultLCID() {
-    return 0x0411;
-}
-
-LCID WINAPI Hooked_GetUserDefaultLCID() {
-    return 0x0411;
-}
-
-LCID WINAPI Hooked_GetThreadLocale() {
-    return 0x0411;
-}
-
-// ==========================================
-// 4. 安装 Hook
-// ==========================================
 void InstallLocaleHooks() {
-    if (MH_Initialize() != MH_OK) {
-        return;
-    }
-
-    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
-    if (!hKernel32) return;
-
-    // 挂钩时区检测
+    if (MH_Initialize() != MH_OK) return;
     MH_CreateHookApi(L"kernel32.dll", "GetTimeZoneInformation", Hooked_GetTimeZoneInformation, (void**)&oGetTimeZoneInformation);
-    
-    // 挂钩代码页检测
     MH_CreateHookApi(L"kernel32.dll", "GetACP", Hooked_GetACP, (void**)&oGetACP);
     MH_CreateHookApi(L"kernel32.dll", "GetOEMCP", Hooked_GetOEMCP, (void**)&oGetOEMCP);
-    
-    // 挂钩区域/语言检测
     MH_CreateHookApi(L"kernel32.dll", "GetSystemDefaultLCID", Hooked_GetSystemDefaultLCID, (void**)&oGetSystemDefaultLCID);
     MH_CreateHookApi(L"kernel32.dll", "GetUserDefaultLCID", Hooked_GetUserDefaultLCID, (void**)&oGetUserDefaultLCID);
     MH_CreateHookApi(L"kernel32.dll", "GetThreadLocale", Hooked_GetThreadLocale, (void**)&oGetThreadLocale);
-
-    // 启用所有 Hook
     MH_EnableHook(MH_ALL_HOOKS);
 }
 
-// ==========================================
-// 5. DLL 入口点
-// ==========================================
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
